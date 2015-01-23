@@ -26,7 +26,10 @@ module Network.Socks5
       SocksAddress(..)
     , SocksHostAddress(..)
     , SocksReply(..)
+    , SocksResponse(..)
+    , SocksRequest(..)
     , SocksError(..)
+    , SocksCommand(..)
     -- * Configuration
     , module Network.Socks5.Conf
     -- * Methods
@@ -37,20 +40,26 @@ module Network.Socks5
     , socksConnectName
     , socksConnectTo
     , socksConnectWith
+    , socksBindWithSocket
+    , socksBind
+    , socksAccept
+    , socksListen
+    , sendSerialized
     ) where
 
 import Control.Monad
 import Control.Exception
 import qualified Data.ByteString.Char8 as BC
 import Network.Socket ( sClose, Socket, SocketType(..), SockAddr(..), Family(..)
-                      , socket, socketToHandle, connect)
+                      , socket, socketToHandle, connect, bind, listen, accept)
 import Network.BSD
 import Network (PortID(..))
 
 import qualified Network.Socks5.Command as Cmd
 import Network.Socks5.Conf
 import Network.Socks5.Types
-import Network.Socks5.Lowlevel
+import Network.Socks5.Lowlevel hiding (socksListen)
+import qualified Network.Socks5.Lowlevel as L
 
 import System.IO
 
@@ -87,7 +96,7 @@ socksConnect serverConf destAddr =
 -- a unix sockaddr will raises an exception.
 --
 -- |socket|-----sockServer----->|server|----destAddr----->|destination|
-{-# DEPRECATED socksConnectAddr "use socksConnectWithSocket" #-}
+-- {-# DEPRECATED socksConnectAddr "use socksConnectWithSocket" #-}
 socksConnectAddr :: Socket -> SockAddr -> SockAddr -> IO ()
 socksConnectAddr sock sockserver destaddr =
     socksConnectWithSocket sock
@@ -126,6 +135,48 @@ socksConnectTo sockshost socksport desthost destport = do
     sock <- socksConnectWith socksConf desthost destport
     socketToHandle sock ReadWriteMode
 
+resolvePortID :: PortID -> IO PortNumber
 resolvePortID (Service serv) = getServicePortNumber serv
 resolvePortID (PortNumber n) = return n
 resolvePortID _              = error "unsupported unix PortID"
+
+socksBindWithSocket :: Socket -> SocksConf -> Int -> IO SockAddr
+socksBindWithSocket sock serverConf i = do
+    saddr <- resolveToSockAddr (socksServer serverConf)
+    bind sock saddr
+    listen sock i
+    return saddr
+
+socksBind :: SocksConf -> Int -> IO (Socket, SockAddr)
+socksBind serverConf i = do
+    proto <- getProtocolNumber "tcp" 
+    bracketOnError (socket AF_INET Stream proto) sClose $ \sock -> do
+        ret <- socksBindWithSocket sock serverConf i
+        return (sock, ret)
+
+socksAccept :: Socket -> IO (Socket, SockAddr)
+socksAccept = accept
+
+socksListen :: Socket -> IO (Either SocksError (Socket, SocksAddress))
+socksListen client = do
+    req <- L.socksListen client
+    case req of
+        (SocksRequest SocksCommandConnect daddr dport) -> do
+            proto <- getProtocolNumber "tcp" 
+            dest <- socket AF_INET Stream proto
+            let daddr' = SocksAddress daddr dport
+            connect dest <=< resolveToSockAddr $ daddr'
+            -- TODO: Send error and disconnect on error
+            sendSerialized client (SocksResponse SocksReplySuccess daddr dport)
+            return $ Right (dest, daddr')
+        _ -> do
+            sendSerialized client errorResponse            
+            sClose client
+            return $ Left SocksErrorCommandNotSupported
+    where errorResponse = SocksResponse 
+                            (SocksReplyError SocksErrorCommandNotSupported)   
+                            (SocksAddrDomainName BC.empty) 0
+
+
+{- socksListenTo :: String -> PortID -> String -> PortID -> IO Handle -}
+{- socksListenTo  -}
