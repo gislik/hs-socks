@@ -44,6 +44,8 @@ module Network.Socks5
     , socksBind
     , socksAccept
     , socksListen
+    , socksListen6
+    , socksListenWith
     , sendSerialized
     ) where
 
@@ -158,17 +160,30 @@ socksAccept :: Socket -> IO (Socket, SockAddr)
 socksAccept = accept
 
 socksListen :: Socket -> IO (Either SocksError (Socket, SocksAddress))
-socksListen client = do
+socksListen client = socksListenWith client $ \addr -> do
+    proto   <- getProtocolNumber "tcp" 
+    socket  <- socket AF_INET Stream proto
+    saddr   <- resolveToSockAddr addr
+    return (socket, saddr)
+
+socksListen6 :: Socket -> IO (Either SocksError (Socket, SocksAddress))
+socksListen6 client = socksListenWith client $ \addr -> do
+    proto   <- getProtocolNumber "tcp" 
+    socket  <- socket AF_INET6 Stream proto
+    saddr   <- resolveToSockAddr6 addr
+    return (socket, saddr)
+
+socksListenWith :: Socket -> (SocksAddress -> IO (Socket, SockAddr)) -> IO (Either SocksError (Socket, SocksAddress))
+socksListenWith client mf = do
     req <- L.socksListen client
     case req of
-        (SocksRequest SocksCommandConnect daddr dport) -> do
-            proto <- getProtocolNumber "tcp" 
-            dest <- socket AF_INET Stream proto
-            let daddr' = SocksAddress daddr dport
-            connect dest <=< resolveToSockAddr $ daddr'
+        (SocksRequest SocksCommandConnect dhaddrs dport) -> do
+            let daddrs = SocksAddress dhaddrs dport
+            (dest, daddr) <- mf daddrs
+            connect dest daddr
             -- TODO: Send error and disconnect on error
-            sendSerialized client (SocksResponse SocksReplySuccess daddr dport)
-            return $ Right (dest, daddr')
+            sendSerialized client (SocksResponse SocksReplySuccess dhaddrs dport)
+            return $ Right (dest, daddrs)
         _ -> do
             sendSerialized client errorResponse            
             sClose client
